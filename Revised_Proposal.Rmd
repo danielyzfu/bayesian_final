@@ -1,0 +1,643 @@
+---
+title: "Bayesian Final Project"
+output: pdf_document
+date: "2026-01-23"
+---
+
+```{r data_import}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+
+path <- "spx_data_weekly.xlsx"
+
+# 1) Read with the top header row as column names (what you see: A, ...3, ...4, AAPL, ...6, ...)
+spx_raw <- read_excel(path, sheet = "spx data", col_names = TRUE)
+
+# 2) The FIRST data row contains the field names (PX_LAST, EQY_DVD_YLD_IND, PE_RATIO, ...)
+field_row <- spx_raw[1, ] %>% unlist(use.names = FALSE)
+
+# 3) Build a "ticker" vector from the existing colnames:
+#    - readxl gives blanks as ...3, ...4 etc
+#    - we treat those as NA and fill down (so ...3 inherits "A", ...6 inherits "AAPL", etc)
+tickers <- names(spx_raw)
+tickers[1] <- "date"
+tickers[-1] <- ifelse(str_detect(tickers[-1], "^\\.\\.\\."), NA_character_, tickers[-1])
+tickers <- tidyr::fill(tibble(tickers), tickers, .direction = "down")$tickers
+
+# 4) New names: keep original Excel field names exactly
+#    date stays date; others become "<TICKER>-<FIELD>"
+new_names <- names(spx_raw)
+new_names[1] <- "date"
+new_names[-1] <- paste0(tickers[-1], "-", as.character(field_row[-1]))
+
+names(spx_raw) <- new_names
+
+# 5) Drop the field row, parse date, make numeric columns numeric
+spx_wide <- spx_raw[-1, ] %>%
+  mutate(
+    date = as.Date(as.character(date)),   # your Excel now looks like "2015-07-03"
+    across(-date, ~ as.numeric(.x))
+  ) %>%
+  filter(!is.na(date))
+
+# 6) Long format: date, Ticker, Field, value
+spx_long <- spx_wide %>%
+  pivot_longer(
+    cols = -date,
+    names_to = "key",
+    values_to = "value"
+  ) %>%
+  separate(
+    key,
+    into = c("Ticker", "Field"),
+    sep = "-(?=[^-]+$)"   # split on the LAST dash only
+  ) %>%
+  rename(Date = date)
+
+# 7) Weekly returns from PX_LAST (this is what you need for annual returns)
+spx_rets <- spx_long %>%
+  filter(Field == "PX_LAST") %>%
+  group_by(Ticker) %>%
+  arrange(Date) %>%
+  mutate(ret_w = value / lag(value) - 1) %>%
+  ungroup() %>%
+  filter(!is.na(ret_w), is.finite(ret_w))
+
+# sanity checks
+nrow(spx_wide)
+nrow(spx_long)
+nrow(spx_rets)
+unique(spx_long$Field)
+```
+
+```{r}
+spx_names = read_excel(path, sheet = "spx names", col_names = TRUE)
+```
+
+## Exploratory Analysis
+
+```{r annual_return_dbn}
+# Annual return distribution (from weekly returns)
+# Assumes you already have: spx_long with columns Date (Date), Ticker, ret_w
+
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(scales)
+
+spx_annual <- spx_rets %>%
+  filter(!is.na(ret_w)) %>%
+  mutate(Year = year(Date)) %>%
+  group_by(Ticker, Year) %>%
+  summarise(
+    n_weeks = n(),
+    ret_y = prod(1 + ret_w) - 1,
+    .groups = "drop"
+  ) %>%
+  filter(n_weeks >= 45)   # keep full-ish years
+
+ggplot(spx_annual, aes(x = ret_y)) +
+  geom_histogram(bins = 60) +
+  scale_x_continuous(labels = percent_format()) +
+  labs(
+    title = "Distribution of annual stock returns (firm-years)",
+    x = "Annual return",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+
+```{r beat_dbn}
+library(readxl)
+library(dplyr)
+library(lubridate)
+
+path <- "spx_data_weekly.xlsx"
+
+# --- 1) Read benchmark sheet (additional data) ---
+bench_raw <- read_excel(path, sheet = "additional data", col_names = TRUE)
+
+# --- 2) Drop the "field row" (row 1 after the header), keep it only if you want to sanity check ---
+# In your file, row 1 contains "PX_LAST" repeated under each ticker.
+bench_wide <- bench_raw[-1, ] %>%
+  mutate(
+    date = as.Date(as.character(date)),      # dates like "2015-07-03"
+    SPY  = as.numeric(SPY)                   # ensure numeric
+  ) %>%
+  filter(!is.na(date)) %>%
+  arrange(date)
+
+# --- 3) Weekly SPY returns ---
+spy_rets <- bench_wide %>%
+  transmute(
+    Date = date,
+    SPY  = SPY
+  ) %>%
+  mutate(spy_ret_w = SPY / lag(SPY) - 1) %>%
+  filter(!is.na(spy_ret_w), is.finite(spy_ret_w))
+
+# --- 4) Annual SPY returns (optional but usually needed for outperformance) ---
+spy_annual <- spy_rets %>%
+  mutate(Year = year(Date)) %>%
+  group_by(Year) %>%
+  summarise(
+    n_weeks = n(),
+    spy_ret_y = prod(1 + spy_ret_w) - 1,
+    .groups = "drop"
+  ) %>%
+  filter(n_weeks >= 45)
+
+# 3) Beat indicator + beat rate by firm
+beat_summary <- spx_annual %>%
+  inner_join(spy_annual %>% select(Year, spy_ret_y), by = "Year") %>%
+  mutate(beat_spy = as.integer(ret_y > spy_ret_y)) %>%
+  group_by(Ticker) %>%
+  summarise(
+    years = n(),
+    beat_rate = mean(beat_spy),
+    .groups = "drop"
+  ) %>%
+  filter(years >= 8)
+
+ggplot(beat_summary, aes(x = beat_rate)) +
+  geom_bar(width = 0.03, fill = "grey40") +
+  scale_x_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Fraction of years beating SPY (by firm)",
+    x = "Outperformance rate",
+    y = "Number of firms"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+
+```{r volatility_vs_outperformance}
+# 1) Weekly volatility by firm (sd of weekly returns)
+vol_by_firm <- spx_rets %>%
+  group_by(Ticker) %>%
+  summarise(
+    weekly_vol = sd(ret_w, na.rm = TRUE),
+    n_weeks = n(),
+    .groups = "drop"
+  )
+
+# 2) Join volatility with outperformance rate + (optional) keep same year cutoff
+plot_df <- beat_summary %>%
+  inner_join(vol_by_firm, by = "Ticker") %>%
+  filter(years >= 8) %>%          # keep consistent with your beat_rate construction
+  filter(!is.na(weekly_vol))
+
+# 3) Plot: Outperformance rate vs volatility
+ggplot(plot_df, aes(x = weekly_vol, y = beat_rate)) +
+  geom_point(alpha = 0.5, size = 2) +
+  labs(
+    title = "Outperformance rate vs volatility",
+    x = "Weekly volatility",
+    y = "Fraction of years beating SPY"
+  ) +
+  theme_minimal()
+
+
+```
+
+```{r setup_firm_chars}
+
+# Firm-level summaries for valuation & income characteristics
+firm_chars = spx_long |>
+  filter(Field %in% c("EQY_DVD_YLD_IND", "PE_RATIO")) |>
+  group_by(Ticker, Field) |>
+  summarise(
+    mean_value = mean(value, na.rm = TRUE),
+    median_value = median(value, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_wider(
+    names_from = Field,
+    values_from = c(mean_value, median_value)
+  )
+
+
+```
+
+```{r dividend_dbn}
+
+# Firm-level summaries for valuation & income characteristics
+ggplot(firm_chars, aes(x = mean_value_EQY_DVD_YLD_IND)) +
+  geom_histogram(bins = 40, fill = "grey50") +
+  labs(
+    title = "Distribution of average dividend yields (by firm)",
+    x = "Average dividend yield",
+    y = "Number of firms"
+  ) +
+  theme_minimal()
+
+```
+```{r pe_dbn}
+
+ggplot(firm_chars, aes(x = mean_value_PE_RATIO)) +
+  geom_histogram(bins = 40, fill = "grey50") +
+  scale_x_continuous(limits = c(0, 50)) +
+  labs(
+    title = "Distribution of average P/E ratios (by firm)",
+    x = "Average P/E ratio",
+    y = "Number of firms"
+  ) +
+  theme_minimal()
+
+
+```
+```{r old_dvd_vs_perf}
+
+dvd_vs_perf <- beat_summary %>%
+  inner_join(firm_chars, by = "Ticker")
+
+ggplot(dvd_vs_perf,
+       aes(x = mean_value_EQY_DVD_YLD_IND, y = beat_rate)) +
+  geom_point(alpha = 0.5) +
+  labs(
+    title = "Dividend yield vs outperformance rate",
+    x = "Average dividend yield",
+    y = "Fraction of years beating SPY"
+  ) +
+  theme_minimal()
+```
+
+```{r div_vs_beat}
+div_data = spx_long |>
+  filter(Field == "EQY_DVD_YLD_IND") |>
+  mutate(Year = lubridate::year(Date)) |>
+  group_by(Ticker, Year) |> #company-years
+  summarise(
+    div_yield = mean(value, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  left_join(spx_names |> select(ticker, gics_sector_name),
+            by = c("Ticker" = "ticker"))
+
+returns_data = spx_annual |>
+  inner_join(spy_annual |> select(Year, spy_ret_y), by = "Year") |>
+  mutate(beat_spy = as.integer(ret_y > spy_ret_y)) |>
+  left_join(spx_names |> select(ticker, gics_sector_name),
+            by = c("Ticker" = "ticker"))
+
+div_vs_beat = div_data |>
+  inner_join(returns_data, by = c("Ticker", "Year", "gics_sector_name"))
+
+div_vs_beat |>
+  ggplot(aes(x = factor(beat_spy), y = div_yield)) +
+  geom_boxplot(fill = "grey70") +
+  labs(
+    title = "Dividend Yield by Whether Company-Year Beats SPY",
+    x = "",
+    y = "Dividend Yield (%)"
+  ) +
+  scale_x_discrete(labels = c("0" = "Does Not Beat SPY",
+                              "1"  = "Beats SPY")) +
+  theme_minimal()
+
+```
+
+```{r div_vs_beat_faceted}
+#faceted by GICS sector. need to improve readability
+div_vs_beat |>
+  left_join(
+    sector_medians |> select(gics_sector_name, beat_spy),
+    by = c("gics_sector_name", "beat_spy")
+  ) |>
+  ggplot(aes(x = factor(beat_spy), y = div_yield)) +
+  geom_boxplot(fill = "grey70") +
+  facet_wrap(~ gics_sector_name) +
+  labs(
+    title = "Dividend Yield by Whether Company-Year Beats SPY",
+    x = "",
+    y = "Dividend Yield (%)"
+  ) +
+  scale_x_discrete(labels = c("0" = "Does Not Beat SPY",
+                              "1"  = "Beats SPY")) +
+  theme_minimal()
+```
+
+```{r pe_vs_outperformance}
+pe_data = spx_long |>
+  filter(Field == "PE_RATIO") |>
+  mutate(Year = lubridate::year(Date)) |>
+  group_by(Ticker, Year) |> #company-years
+  summarise(
+    pe = mean(value, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  left_join(spx_names |> select(ticker, gics_sector_name),
+            by = c("Ticker" = "ticker"))
+
+pe_vs_beat = pe_data |>
+  inner_join(returns_data, by = c("Ticker", "Year"))
+
+pe_vs_beat |>
+  ggplot(aes(x = factor(beat_spy), y = log(pe))) +
+  geom_boxplot(fill = "grey70") +
+  labs(
+    title = "PE Ratio by Whether Company-Year Beats SPY",
+    x = "",
+    y = "log(PE Ratio)"
+  ) +
+  scale_x_discrete(labels = c("0" = "Does Not Beat SPY",
+                              "1"  = "Beats SPY")) +
+  theme_minimal()
+
+
+```
+## Section 3: Proposed Frequentist
+
+```{r}
+#might need to change to reflect new code
+# Bernoulli model: Y_{i,t} ~ Bernoulli(p_i)
+# MLE: p_hat = y / n, where y = number of years beating SPY
+
+freq_fit <- beat_data %>%
+  group_by(Ticker) %>%
+  summarise(
+    n_years = n(),
+    y = sum(beat_spy),
+    p_hat = y / n_years,
+    se = sqrt(p_hat * (1 - p_hat) / n_years),
+    ci_low = pmax(0, p_hat - 1.96 * se),
+    ci_high = pmin(1, p_hat + 1.96 * se),
+    .groups = "drop"
+  ) %>%
+  filter(n_years >= 8)
+
+# Table: top 10 by p_hat
+top10 <- freq_fit %>% arrange(desc(p_hat), desc(n_years)) %>% slice(1:10)
+top10
+
+
+```
+
+
+```{r}
+#might need to change to reflect new code
+# Bernoulli model: Y_{i,t} ~ Bernoulli(p_i)
+# MLE: p_hat = y / n, where y = number of years beating SPY
+
+freq_fit <- beat_data %>%
+  group_by(Ticker) %>%
+  summarise(
+    n_years = n(),
+    y = sum(beat_spy),
+    p_hat = y / n_years,
+    se = sqrt(p_hat * (1 - p_hat) / n_years),
+    ci_low = pmax(0, p_hat - 1.96 * se),
+    ci_high = pmin(1, p_hat + 1.96 * se),
+    .groups = "drop"
+  ) %>%
+  filter(n_years >= 8)
+
+# Table: top 10 by p_hat
+top10 <- freq_fit %>% arrange(desc(p_hat), desc(n_years)) %>% slice(1:10)
+top10
+
+top25 <- freq_fit %>% arrange(desc(p_hat), desc(n_years)) %>% slice(1:25)
+
+ggplot(top25, aes(x = reorder(Ticker, p_hat), y = p_hat)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.2) +
+  coord_flip() +
+  labs(
+    title = "Top 25 firms by estimated P(beat SPY), with 95% Wald CI",
+    x = NULL,
+    y = "Estimated outperformance probability"
+  ) +
+  scale_y_continuous(labels = percent_format()) +
+  theme_minimal()
+```
+
+```{r}
+#might need to change to reflect new code
+# Bernoulli model: Y_{i,t} ~ Bernoulli(p_i)
+# MLE: p_hat = y / n, where y = number of years beating SPY
+
+freq_fit <- beat_data %>%
+  group_by(Ticker) %>%
+  summarise(
+    n_years = n(),
+    y = sum(beat_spy),
+    p_hat = y / n_years,
+    se = sqrt(p_hat * (1 - p_hat) / n_years),
+    ci_low = pmax(0, p_hat - 1.96 * se),
+    ci_high = pmin(1, p_hat + 1.96 * se),
+    .groups = "drop"
+  ) %>%
+  filter(n_years >= 8)
+
+# Table: top 10 by p_hat
+top10 <- freq_fit %>% arrange(desc(p_hat), desc(n_years)) %>% slice(1:10)
+top10
+
+top25 <- freq_fit %>% arrange(desc(p_hat), desc(n_years)) %>% slice(1:25)
+
+ggplot(top25, aes(x = reorder(Ticker, p_hat), y = p_hat)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.2) +
+  coord_flip() +
+  labs(
+    title = "Top 25 firms by estimated P(beat SPY), with 95% Wald CI",
+    x = NULL,
+    y = "Estimated outperformance probability"
+  ) +
+  scale_y_continuous(labels = percent_format()) +
+  theme_minimal()
+```
+
+
+```{r}
+#might need to change to reflect new code
+# Bernoulli model: Y_{i,t} ~ Bernoulli(p_i)
+# MLE: p_hat = y / n, where y = number of years beating SPY
+
+# ------------------------------------------------------------
+# Model 2 (Frequentist): Logistic regression
+# Outcome: did firm beat SPY in a given year? (0/1)
+# Predictors: log(PE) and dividend yield
+# Assumes you already created:
+#   1) spx_long  with columns: Date, Ticker, Field, value
+#   2) spx_rets  with columns: Date, Ticker, ret_w   (weekly returns from PX_LAST)
+# And you have SPY weekly returns as: spy_rets with columns: Date, ret_w
+# ------------------------------------------------------------
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(broom)
+
+
+
+# ------------------------
+# 1) Firm annual returns from weekly returns
+# ------------------------
+sp500_annual <- spx_rets %>%
+  filter(!is.na(ret_w), is.finite(ret_w)) %>%
+  mutate(Year = year(Date)) %>%
+  group_by(Ticker, Year) %>%
+  summarise(
+    n_weeks = n(),
+    ret_y   = prod(1 + ret_w) - 1,
+    .groups = "drop"
+  ) %>%
+  filter(n_weeks >= 45)
+
+# ------------------------
+# 2) Firm-year outcome: Beat SPY? (0/1)
+#    Uses your EXISTING spy_annual
+# ------------------------
+beat_data <- sp500_annual %>%
+  inner_join(spy_annual %>% select(Year, spy_ret_y), by = "Year") %>%
+  mutate(Y = as.integer(ret_y > spy_ret_y))
+
+# ------------------------
+# 3) Firm-year predictors: yearly averages of PE + dividend yield
+# ------------------------
+firm_chars_year <- spx_long %>%
+  mutate(Year = year(Date)) %>%
+  filter(Field %in% c("PE_RATIO", "EQY_DVD_YLD_IND")) %>%
+  group_by(Ticker, Year, Field) %>%
+  summarise(x = mean(value, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Field, values_from = x) %>%
+  rename(
+    pe        = PE_RATIO,
+    div_yield = EQY_DVD_YLD_IND
+  ) %>%
+  mutate(log_pe = log(pe))
+
+# ------------------------
+# 4) Final modeling dataset + logistic regression
+# ------------------------
+model_df <- beat_data %>%
+  left_join(firm_chars_year, by = c("Ticker", "Year")) %>%
+  filter(
+    !is.na(Y),
+    is.finite(log_pe),
+    !is.na(div_yield), is.finite(div_yield)
+  )
+
+m2 <- glm(Y ~ log_pe + div_yield, data = model_df, family = binomial())
+summary(m2)
+
+# Odds ratios (+ 95% CI)
+or_table <- tidy(m2, conf.int = TRUE, exponentiate = TRUE)
+or_table
+
+# ------------------------
+# 5) (Optional) plot predicted probabilities distribution
+# ------------------------
+model_df <- model_df %>% mutate(p_hat = predict(m2, type = "response"))
+
+ggplot(model_df, aes(x = p_hat)) +
+  geom_histogram(bins = 40) +
+  labs(
+    title = "Predicted P(beat SPY) (firm-years)",
+    x = "Predicted probability",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+
+```
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+# Revised Frequentist Models
+The mixed-effects models are likely overfitting (`boundary (singular) fit` issue)
+
+```{r}
+m3_df = div_vs_beat |>
+  inner_join(pe_data, by= c("Ticker","Year", "gics_sector_name")) |>
+  mutate(
+    log_pe = log(pe)
+  ) |>
+  filter(
+    is.finite(log_pe),
+    !is.na(div_yield),
+    !is.na(beat_spy),
+    !is.na(gics_sector_name)
+  ) |>
+  select(-c(ret_y, spy_ret_y))
+  
+```
+
+```{r}
+#logistic regression models fitted within each sector
+library(purrr)
+library(modelsummary)
+
+sector_models = m3_df |>
+  group_split(gics_sector_name) |>
+  setNames(unique(m3_df$gics_sector_name)) |>
+  map(~ glm(
+    beat_spy ~ log_pe + div_yield,
+    data = .x,
+    family = binomial(link = "logit")
+  ))
+
+modelsummary(sector_models)
+
+```
+
+```{r}
+#mixed-effects w/ firm-level random intercepts
+library(lme4)
+mixed_intercept = glmer(
+  beat_spy ~ log_pe + div_yield + 
+    (1 | Ticker),
+  data = m3_df,
+  family = binomial(link = "logit")
+)
+mixed_intercept |> summary()
+```
+
+```{r}
+#mixed effects w/ firm-level random slopes
+mixed_random_slopes = glmer(
+  beat_spy ~ log_pe + div_yield +
+    (1 + log_pe + div_yield | Ticker),
+  data = m3_df,
+  family = binomial(link = "logit"),
+  control = glmerControl(optimizer = "bobyqa")
+)
+
+mixed_random_slopes |> summary()
+```
+
+```{r}
+#mixed-effects model w/ sector-level random slopes
+mixed_sector_slopes = glmer(
+  beat_spy ~ log_pe + div_yield +
+    (1 + log_pe + div_yield | gics_sector_name),
+  data = m3_df,
+  family = binomial(link = "logit")
+)
+
+mixed_sector_slopes |> summary()
+```
+
+```{r}
+#mixed-effects model with sector-level variation + firm-level variation within sector
+mixed_nested = glmer(
+  beat_spy ~ log_pe + div_yield +
+    (1 | gics_sector_name/Ticker),
+  data = m3_df,
+  family = binomial(link = "logit")
+)
+
+mixed_nested |> summary()
+```
+
