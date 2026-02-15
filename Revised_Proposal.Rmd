@@ -167,8 +167,10 @@ beat_summary <- spx_annual %>%
   filter(years >= 8)
 
 ggplot(beat_summary, aes(x = beat_rate)) +
-  geom_bar(width = 0.03, fill = "grey40") +
-  scale_x_continuous(labels = scales::percent_format()) +
+  geom_histogram(binwidth = 0.1, boundary = 0, closed = "left") +
+  scale_x_continuous(
+    breaks = seq(0, 1, by = 0.1),
+    labels = scales::percent_format()) +
   labs(
     title = "Fraction of years beating SPY (by firm)",
     x = "Outperformance rate",
@@ -310,10 +312,6 @@ div_vs_beat |>
 ```{r div_vs_beat_faceted}
 #faceted by GICS sector. need to improve readability
 div_vs_beat |>
-  left_join(
-    sector_medians |> select(gics_sector_name, beat_spy),
-    by = c("gics_sector_name", "beat_spy")
-  ) |>
   ggplot(aes(x = factor(beat_spy), y = div_yield)) +
   geom_boxplot(fill = "grey70") +
   facet_wrap(~ gics_sector_name) +
@@ -340,7 +338,7 @@ pe_data = spx_long |>
             by = c("Ticker" = "ticker"))
 
 pe_vs_beat = pe_data |>
-  inner_join(returns_data, by = c("Ticker", "Year"))
+  inner_join(returns_data, by = c("Ticker", "Year", "gics_sector_name"))
 
 pe_vs_beat |>
   ggplot(aes(x = factor(beat_spy), y = log(pe))) +
@@ -353,9 +351,23 @@ pe_vs_beat |>
   scale_x_discrete(labels = c("0" = "Does Not Beat SPY",
                               "1"  = "Beats SPY")) +
   theme_minimal()
-
-
 ```
+
+```{r}
+pe_vs_beat |>
+  ggplot(aes(x = factor(beat_spy), y = log(pe))) +
+  geom_boxplot(fill = "grey70") +
+  facet_wrap(~ gics_sector_name) +
+  labs(
+    title = "PE Ratio by Whether Company-Year Beats SPY",
+    x = "",
+    y = "Dividend Yield (%)"
+  ) +
+  scale_x_discrete(labels = c("0" = "Does Not Beat SPY",
+                              "1"  = "Beats SPY")) +
+  theme_minimal()
+```
+
 ## Section 3: Proposed Frequentist
 
 ```{r}
