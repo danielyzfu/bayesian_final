@@ -1,7 +1,6 @@
 ---
-title: "Bayesian Final Project"
+title: "Final Project - Bayesian Analysis"
 output: pdf_document
-date: "2026-01-23"
 ---
 
 ```{r data_import}
@@ -18,77 +17,6 @@ library(stringr)
 load("beatspy.RData")
 ```
 
-# Revised Frequentist Models
-The mixed-effects models are likely overfitting (`boundary (singular) fit` issue)
-
-```{r}
-#logistic regression models fitted within each sector
-library(purrr)
-library(modelsummary)
-
-sector_models = m3_df |>
-  group_split(gics_sector_name) |>
-  setNames(unique(m3_df$gics_sector_name)) |>
-  map(~ glm(
-    beat_spy ~ log_pe + div_yield,
-    data = .x,
-    family = binomial(link = "logit")
-  ))
-
-modelsummary(sector_models)
-
-```
-
-```{r}
-#mixed-effects w/ firm-level random intercepts
-library(lme4)
-mixed_intercept = glmer(
-  beat_spy ~ log_pe + div_yield + 
-    (1 | Ticker),
-  data = m3_df,
-  family = binomial(link = "logit")
-)
-mixed_intercept |> summary()
-```
-
-```{r}
-#mixed effects w/ firm-level random slopes
-mixed_random_slopes = glmer(
-  beat_spy ~ log_pe + div_yield +
-    (1 + log_pe + div_yield | Ticker),
-  data = m3_df,
-  family = binomial(link = "logit"),
-  control = glmerControl(optimizer = "bobyqa")
-)
-
-mixed_random_slopes |> summary()
-```
-
-```{r}
-#mixed-effects model w/ sector-level random slopes
-mixed_sector_slopes = glmer(
-  beat_spy ~ log_pe + div_yield +
-    (1 + log_pe + div_yield | gics_sector_name),
-  data = m3_df,
-  family = binomial(link = "logit")
-)
-
-mixed_sector_slopes |> summary()
-```
-
-```{r}
-#mixed-effects model with sector-level variation + firm-level variation within sector
-mixed_nested = glmer(
-  beat_spy ~ log_pe + div_yield +
-    (1 | gics_sector_name/Ticker),
-  data = m3_df,
-  family = binomial(link = "logit")
-)
-
-mixed_nested |> summary()
-```
-
-## Bayesian Analysis
 ```{r}
 #| message: false
 library(brms)
@@ -118,6 +46,8 @@ bayes_model1 <- brm(
 summary(bayes_model1)$fixed
 ```
 
+Rhats are ~1 and effective sample sizes >> 100
+
 ```{r}
 draws_model1 = bayes_model1 |>
   as_draws_array()
@@ -126,6 +56,8 @@ mcmc_trace(draws_model1,
            pars = c("b_log_pe", "b_div_yield", "b_Intercept"))
 ```
 
+No discernable pattern from trace plots
+
 ```{r}
 mcmc_acf_bar(
   draws_model1,
@@ -133,7 +65,15 @@ mcmc_acf_bar(
 )
 ```
 
+acfs fall off quickly
+
 ## Model 2 (Hierarchical)
+
+(including both sector and firm-level random intercepts)
+
+\begin{align*}
+logit(p_{i,t}) = \beta_0 + \beta_1 log(PE_{i,t}) + \beta_2 DivYield_{i,t} + u_{j} + v_i
+\end{align*}
 
 ```{r}
 #| results: hide
@@ -148,6 +88,8 @@ bayes_model2 <- brm(
 ```{r}
 summary(bayes_model2)
 ```
+
+Rhats are all ~1, effective sample sizes >> 100
 
 ```{r}
 draws_model2 = bayes_model2 |>
@@ -169,6 +111,8 @@ mcmc_acf_bar(
   pars = c("b_log_pe", "b_div_yield", "b_Intercept", "sd_gics_sector_name__Intercept", "sd_gics_sector_name:Ticker__Intercept")
 )
 ```
+
+acfs fall off quickly
 
 ### Model Comparison
 ```{r}
