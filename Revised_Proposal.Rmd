@@ -375,107 +375,6 @@ pe_vs_beat |>
 # Bernoulli model: Y_{i,t} ~ Bernoulli(p_i)
 # MLE: p_hat = y / n, where y = number of years beating SPY
 
-freq_fit <- beat_data %>%
-  group_by(Ticker) %>%
-  summarise(
-    n_years = n(),
-    y = sum(beat_spy),
-    p_hat = y / n_years,
-    se = sqrt(p_hat * (1 - p_hat) / n_years),
-    ci_low = pmax(0, p_hat - 1.96 * se),
-    ci_high = pmin(1, p_hat + 1.96 * se),
-    .groups = "drop"
-  ) %>%
-  filter(n_years >= 8)
-
-# Table: top 10 by p_hat
-top10 <- freq_fit %>% arrange(desc(p_hat), desc(n_years)) %>% slice(1:10)
-top10
-
-
-```
-
-
-```{r}
-#might need to change to reflect new code
-# Bernoulli model: Y_{i,t} ~ Bernoulli(p_i)
-# MLE: p_hat = y / n, where y = number of years beating SPY
-
-freq_fit <- beat_data %>%
-  group_by(Ticker) %>%
-  summarise(
-    n_years = n(),
-    y = sum(beat_spy),
-    p_hat = y / n_years,
-    se = sqrt(p_hat * (1 - p_hat) / n_years),
-    ci_low = pmax(0, p_hat - 1.96 * se),
-    ci_high = pmin(1, p_hat + 1.96 * se),
-    .groups = "drop"
-  ) %>%
-  filter(n_years >= 8)
-
-# Table: top 10 by p_hat
-top10 <- freq_fit %>% arrange(desc(p_hat), desc(n_years)) %>% slice(1:10)
-top10
-
-top25 <- freq_fit %>% arrange(desc(p_hat), desc(n_years)) %>% slice(1:25)
-
-ggplot(top25, aes(x = reorder(Ticker, p_hat), y = p_hat)) +
-  geom_point() +
-  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.2) +
-  coord_flip() +
-  labs(
-    title = "Top 25 firms by estimated P(beat SPY), with 95% Wald CI",
-    x = NULL,
-    y = "Estimated outperformance probability"
-  ) +
-  scale_y_continuous(labels = percent_format()) +
-  theme_minimal()
-```
-
-```{r}
-#might need to change to reflect new code
-# Bernoulli model: Y_{i,t} ~ Bernoulli(p_i)
-# MLE: p_hat = y / n, where y = number of years beating SPY
-
-freq_fit <- beat_data %>%
-  group_by(Ticker) %>%
-  summarise(
-    n_years = n(),
-    y = sum(beat_spy),
-    p_hat = y / n_years,
-    se = sqrt(p_hat * (1 - p_hat) / n_years),
-    ci_low = pmax(0, p_hat - 1.96 * se),
-    ci_high = pmin(1, p_hat + 1.96 * se),
-    .groups = "drop"
-  ) %>%
-  filter(n_years >= 8)
-
-# Table: top 10 by p_hat
-top10 <- freq_fit %>% arrange(desc(p_hat), desc(n_years)) %>% slice(1:10)
-top10
-
-top25 <- freq_fit %>% arrange(desc(p_hat), desc(n_years)) %>% slice(1:25)
-
-ggplot(top25, aes(x = reorder(Ticker, p_hat), y = p_hat)) +
-  geom_point() +
-  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.2) +
-  coord_flip() +
-  labs(
-    title = "Top 25 firms by estimated P(beat SPY), with 95% Wald CI",
-    x = NULL,
-    y = "Estimated outperformance probability"
-  ) +
-  scale_y_continuous(labels = percent_format()) +
-  theme_minimal()
-```
-
-
-```{r}
-#might need to change to reflect new code
-# Bernoulli model: Y_{i,t} ~ Bernoulli(p_i)
-# MLE: p_hat = y / n, where y = number of years beating SPY
-
 # ------------------------------------------------------------
 # Model 2 (Frequentist): Logistic regression
 # Outcome: did firm beat SPY in a given year? (0/1)
@@ -564,8 +463,6 @@ ggplot(model_df, aes(x = p_hat)) +
 
 
 ```
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
-
 
 # Revised Frequentist Models
 The mixed-effects models are likely overfitting (`boundary (singular) fit` issue)
@@ -653,3 +550,91 @@ mixed_nested = glmer(
 mixed_nested |> summary()
 ```
 
+## Bayesian Analysis
+```{r}
+library(brms)
+library(tidybayes)
+library(bayesplot)
+library(posterior)
+```
+
+### Model 1 (Logistic)
+
+\begin{align*}
+Y_{i,t} \sim Bernoulli(p_{i,t})\\
+logit(p_{i,t}) = \beta_0 + \beta_1 + log(PE_{i,t}) + \beta_2 DivYield_{i,t}
+\end{align*}
+
+```{r}
+bayes_model1 <- brm(
+  beat_spy ~ log_pe + div_yield,
+  data = m3_df,
+  family = bernoulli(link = "logit"),
+  seed = 123
+)
+```
+
+```{r}
+summary(bayes_model1)$fixed
+```
+
+```{r}
+draws_model1 = bayes_model1 |>
+  as_draws_array()
+
+mcmc_trace(draws_model1,
+           pars = c("b_log_pe", "b_div_yield", "b_Intercept"))
+```
+
+```{r}
+mcmc_acf_bar(
+  draws_model1,
+  pars = c("b_log_pe", "b_div_yield", "b_Intercept")
+)
+```
+
+## Model 2 (Hierarchical)
+
+$$logit(p_{i,t}) = \beta_0 + \beta_1log(PE)+\beta_2DivYield+$$
+
+```{r}
+bayes_model2 <- brm(
+  beat_spy ~ log_pe + div_yield + (1 | gics_sector_name/Ticker),
+  data = m3_df,
+  family = bernoulli(link = "logit"),
+  seed = 123
+)
+```
+
+```{r}
+summary(bayes_model2)
+```
+
+```{r}
+draws_model2 = bayes_model2 |>
+  as_draws_array()
+
+mcmc_trace(
+  draws_model2,
+  pars = c("b_log_pe",
+           "b_div_yield",
+           "b_Intercept",
+           "sd_gics_sector_name__Intercept",
+           "sd_gics_sector_name:Ticker__Intercept")
+)
+```
+
+```{r}
+mcmc_acf_bar(
+  draws_model2,
+  pars = c("b_log_pe", "b_div_yield", "b_Intercept", "sd_gics_sector_name__Intercept", "sd_gics_sector_name:Ticker__Intercept")
+)
+```
+
+### Model Comparison
+```{r}
+loo_compare(loo(bayes_model1),
+            loo(bayes_model2))
+```
+
+The difference in expected log predictive density is 22.2 (SE = 7.0). LOOCV provides strong evidence that the multilevel specification improves out-of-sample predictive performance.
