@@ -18,6 +18,10 @@ library(lme4)
 load("beatspy.RData")
 ```
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
 # Frequentist
 
 ```{r}
