@@ -177,9 +177,7 @@ mcmc_acf_bar(
 
 acfs fall off quickly
 
-## Model 2 (Hierarchical)
-
-(including both sector and firm-level random intercepts)
+## Model 2 (Nested random intercepts)
 
 \begin{align*}
 logit(p_{i,t}) = \beta_0 + \beta_1 log(PE_{i,t}) + \beta_2 DivYield_{i,t} + u_{j} + v_i
@@ -187,7 +185,7 @@ logit(p_{i,t}) = \beta_0 + \beta_1 log(PE_{i,t}) + \beta_2 DivYield_{i,t} + u_{j
 
 ```{r}
 #| results: hide
-bayes_model2 <- brm(
+bayes_model2 = brm(
   beat_spy ~ log_pe + div_yield + (1 | gics_sector_name/Ticker),
   data = m3_df,
   family = bernoulli(link = "logit"),
@@ -224,10 +222,86 @@ mcmc_acf_bar(
 
 acfs fall off quickly
 
+### Model 3 (Mixed Effects + firm-level random slopes/intercepts)
+
+Covariates are centered
+
+```{r}
+#| results: hide
+bayes_model3 = brm(
+  beat_spy ~ log_pe + div_yield + (1 + log_pe + div_yield | Ticker),
+  data = m3_df |> mutate(log_pe = scale(log_pe),
+                         div_yield = scale(div_yield)),
+  family = bernoulli(link = "logit"),
+  seed = 123
+)
+```
+
+```{r}
+summary(bayes_model3)
+```
+
+Rhats are ~1 and effective sample sizes >> 100
+
+```{r}
+draws_bayes_mixed = bayes_model3 |>
+  as_draws_array()
+
+mcmc_trace(draws_bayes_mixed,
+           pars = c("b_log_pe", "b_div_yield", "b_Intercept","sd_Ticker__Intercept", "sd_Ticker__log_pe", "sd_Ticker__div_yield"))
+```
+
+No discernable pattern from trace plots
+
+```{r}
+mcmc_acf_bar(
+  draws_bayes_mixed,
+  pars = c("b_log_pe", "b_div_yield", "b_Intercept","sd_Ticker__Intercept", "sd_Ticker__log_pe", "sd_Ticker__div_yield"))
+```
+
+### Model 4 (Pooled + sector FE)
+
+```{r}
+#| results: hide
+bayes_fe = brm(
+  beat_spy ~ log_pe + div_yield + factor(gics_sector_name),
+  data = m3_df,
+  family = bernoulli(link = "logit"),
+  seed = 123
+)
+```
+
+```{r}
+summary(bayes_fe)
+```
+
+Rhats are ~1 and effective sample sizes >> 100
+
+```{r}
+draws_bayes_fe = bayes_fe |>
+  as_draws_array()
+
+mcmc_trace(draws_bayes_fe,
+           pars = c("b_log_pe", "b_div_yield", "b_Intercept","b_factorgics_sector_nameInformationTechnology"))
+```
+
+No discernable pattern from trace plots
+
+```{r}
+mcmc_acf_bar(
+  draws_bayes_fe,
+  pars = c("b_log_pe", "b_div_yield", "b_Intercept","b_factorgics_sector_nameInformationTechnology")
+)
+```
+
 ### Model Comparison
 ```{r}
 loo_compare(loo(bayes_model1),
-            loo(bayes_model2))
+            loo(bayes_model2),
+            loo(bayes_model3),
+            loo(bayes_fe))
 ```
 
-The difference in expected log predictive density is 22.2 (SE = 7.0). LOOCV provides strong evidence that the multilevel specification improves out-of-sample predictive performance.
+LOOCV favors the `pooled model with sector fixed effects` and the `model with nested random intercepts` over the `baseline pooled model` and `mixed effects model w/ firm-level random intercepts and slopes`.
+
+The sector FE and nested random intercepts models are generally comparable (firm-level variation may be small)
