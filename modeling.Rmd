@@ -1,0 +1,233 @@
+---
+title: "Final Project - Bayesian Analysis"
+output: pdf_document
+---
+
+```{r data_import}
+#| message: false
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(lme4)
+```
+
+```{r}
+load("beatspy.RData")
+```
+
+# Frequentist
+
+```{r}
+#logistic regression models fitted within each sector
+library(purrr)
+library(modelsummary)
+
+sector_models = m3_df |>
+  group_split(gics_sector_name) |>
+  setNames(unique(m3_df$gics_sector_name)) |>
+  map(~ glm(
+    beat_spy ~ log_pe + div_yield,
+    data = .x,
+    family = binomial(link = "logit")
+  ))
+
+modelsummary(sector_models)
+
+```
+
+```{r}
+#mixed effects w/ firm-level random slopes
+mixed_random_slopes = glmer(
+  beat_spy ~ log_pe + div_yield +
+    (1 + log_pe + div_yield | Ticker),
+  data = m3_df,
+  family = binomial(link = "logit"),
+  control = glmerControl(optimizer = "bobyqa")
+)
+
+mixed_random_slopes |> summary()
+```
+
+```{r}
+#pooled logistic model w sector fixed effects
+pooled_fe = glm(
+  beat_spy ~ log_pe + div_yield + factor(gics_sector_name),
+  data = m3_df,
+  family = binomial(link = "logit")
+)
+
+summary(pooled_fe)
+```
+
+```{r}
+#pooled logistic model w sector fe + interactions with DivYield
+pooled_fe_interact = glm(
+  beat_spy ~ 
+    log_pe +
+    div_yield * factor(gics_sector_name),
+  data = m3_df,
+  family = binomial(link = "logit")
+)
+
+summary(pooled_fe_interact)
+```
+
+## Model Comparison
+
+```{r}
+# manually back out AIC + BIC
+# AIC = 2l + 2k
+# BIC = 2l + log(n) * k 
+
+sector_logLik = sum(sapply(sector_models, logLik))
+sector_k = sum(sapply(sector_models, function(m) attr(logLik(m), "df")))
+
+sector_AIC = -2 * as.numeric(sector_logLik) + 2 * sector_k
+sector_BIC = -2 * as.numeric(sector_logLik) + 
+              log(nrow(m3_df)) * sector_k
+
+# AIC
+aic_comp = AIC(pooled_fe,
+               pooled_fe_interact,
+               mixed_random_slopes)
+aic_comp = data.frame(
+  Model = rownames(aic_comp),
+  df = aic_comp$df,
+  AIC = aic_comp$AIC,
+  row.names = NULL
+) |>
+  rbind(data.frame(Model = "sector_models",
+                   df = sector_k,
+                   AIC = sector_AIC))
+
+#BIC
+bic_comp = BIC(pooled_fe,
+               pooled_fe_interact,
+               mixed_random_slopes)
+bic_comp = data.frame(
+  Model = rownames(bic_comp),
+  df = bic_comp$df,
+  BIC = bic_comp$BIC,
+  row.names = NULL
+) |>
+  rbind(data.frame(Model = "sector_models",
+                   df = sector_k,
+                   BIC = sector_BIC))
+```
+
+```{r}
+aic_comp |> arrange(AIC)
+bic_comp |> arrange(BIC)
+```
+
+(to-do -- LOOCV)
+
+# Bayesian
+
+```{r}
+#| message: false
+library(brms)
+library(tidybayes)
+library(bayesplot)
+library(posterior)
+```
+
+### Model 1 (Logistic)
+
+\begin{align*}
+Y_{i,t} \sim Bernoulli(p_{i,t})\\
+logit(p_{i,t}) = \beta_0 + \beta_1 + log(PE_{i,t}) + \beta_2 DivYield_{i,t}
+\end{align*}
+
+```{r}
+#| results: hide
+bayes_model1 <- brm(
+  beat_spy ~ log_pe + div_yield,
+  data = m3_df,
+  family = bernoulli(link = "logit"),
+  seed = 123
+)
+```
+
+```{r}
+summary(bayes_model1)$fixed
+```
+
+Rhats are ~1 and effective sample sizes >> 100
+
+```{r}
+draws_model1 = bayes_model1 |>
+  as_draws_array()
+
+mcmc_trace(draws_model1,
+           pars = c("b_log_pe", "b_div_yield", "b_Intercept"))
+```
+
+No discernable pattern from trace plots
+
+```{r}
+mcmc_acf_bar(
+  draws_model1,
+  pars = c("b_log_pe", "b_div_yield", "b_Intercept")
+)
+```
+
+acfs fall off quickly
+
+## Model 2 (Hierarchical)
+
+(including both sector and firm-level random intercepts)
+
+\begin{align*}
+logit(p_{i,t}) = \beta_0 + \beta_1 log(PE_{i,t}) + \beta_2 DivYield_{i,t} + u_{j} + v_i
+\end{align*}
+
+```{r}
+#| results: hide
+bayes_model2 <- brm(
+  beat_spy ~ log_pe + div_yield + (1 | gics_sector_name/Ticker),
+  data = m3_df,
+  family = bernoulli(link = "logit"),
+  seed = 123
+)
+```
+
+```{r}
+summary(bayes_model2)
+```
+
+Rhats are all ~1, effective sample sizes >> 100
+
+```{r}
+draws_model2 = bayes_model2 |>
+  as_draws_array()
+
+mcmc_trace(
+  draws_model2,
+  pars = c("b_log_pe",
+           "b_div_yield",
+           "b_Intercept",
+           "sd_gics_sector_name__Intercept",
+           "sd_gics_sector_name:Ticker__Intercept")
+)
+```
+
+```{r}
+mcmc_acf_bar(
+  draws_model2,
+  pars = c("b_log_pe", "b_div_yield", "b_Intercept", "sd_gics_sector_name__Intercept", "sd_gics_sector_name:Ticker__Intercept")
+)
+```
+
+acfs fall off quickly
+
+### Model Comparison
+```{r}
+loo_compare(loo(bayes_model1),
+            loo(bayes_model2))
+```
+
+The difference in expected log predictive density is 22.2 (SE = 7.0). LOOCV provides strong evidence that the multilevel specification improves out-of-sample predictive performance.
