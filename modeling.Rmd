@@ -165,7 +165,7 @@ cv_results <- map_dfr(folds, function(f){
   
   # Mixed-effects logistic regression
   mixed_mod <- glmer(
-    beat_spy ~ log_pe + div_yield + (1 | Ticker),
+    beat_spy ~ log_pe + div_yield + (1 + log_pe + div_yield | Ticker),
     data = train,
     family = binomial,
     control = glmerControl(optimizer = "bobyqa")
