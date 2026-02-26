@@ -12,10 +12,26 @@ library(tidyr)
 library(lubridate)
 library(stringr)
 library(lme4)
+library(tidymodels)
+library(purrr)
+library(tidyr)
+library(pROC)
+library(groupdata2)
 ```
 
 ```{r}
 load("beatspy.RData")
+m3_df = m3_df |>
+  mutate(
+    beat_spy = factor(
+      beat_spy,
+      levels = c(1, 0),      # 1 = event
+      labels = c("yes", "no")
+    ),
+    gics_sector_name = factor(gics_sector_name),
+    Ticker = factor(Ticker)
+  )
+set.seed(123)
 ```
 
 ```{r setup, include=FALSE}
@@ -23,6 +39,10 @@ knitr::opts_chunk$set(echo = FALSE)
 ```
 
 # Frequentist
+
+## Models
+
+### Sector Models
 
 ```{r}
 #logistic regression models fitted within each sector
@@ -42,6 +62,7 @@ modelsummary(sector_models)
 
 ```
 
+### Firm Mixed Effects
 ```{r}
 #mixed effects w/ firm-level random slopes
 mixed_random_slopes = glmer(
@@ -55,6 +76,7 @@ mixed_random_slopes = glmer(
 mixed_random_slopes |> summary()
 ```
 
+### Sector Fixed Effects
 ```{r}
 #pooled logistic model w sector fixed effects
 pooled_fe = glm(
@@ -66,6 +88,7 @@ pooled_fe = glm(
 summary(pooled_fe)
 ```
 
+### Sector Fixed Effects w/ Interactions
 ```{r}
 #pooled logistic model w sector fe + interactions with DivYield
 pooled_fe_interact = glm(
@@ -81,10 +104,12 @@ summary(pooled_fe_interact)
 
 ## Model Comparison
 
+### Information Criterion
+
 ```{r}
 # manually back out AIC + BIC
-# AIC = 2l + 2k
-# BIC = 2l + log(n) * k 
+# AIC = -2l + 2k
+# BIC = -2l + log(n) * k 
 
 sector_logLik = sum(sapply(sector_models, logLik))
 sector_k = sum(sapply(sector_models, function(m) attr(logLik(m), "df")))
@@ -127,7 +152,81 @@ aic_comp |> arrange(AIC)
 bic_comp |> arrange(BIC)
 ```
 
-(to-do -- LOOCV)
+### Predictive Performance
+```{r}
+cv_df <- m3_df %>% fold(k = 10, cat_col = "gics_sector_name")
+
+folds <- unique(cv_df$.folds)
+
+cv_results <- map_dfr(folds, function(f){
+  
+  train <- filter(cv_df, .folds != f)
+  test  <- filter(cv_df, .folds == f)
+  
+  # Mixed-effects logistic regression
+  mixed_mod <- glmer(
+    beat_spy ~ log_pe + div_yield + (1 | Ticker),
+    data = train,
+    family = binomial,
+    control = glmerControl(optimizer = "bobyqa")
+  )
+  mixed_pred <- predict(mixed_mod, newdata = test, type = "response", re.form = NA)
+  
+  # Pooled FE
+  pooled_mod <- glm(
+    beat_spy ~ log_pe + div_yield + factor(gics_sector_name),
+    data = train,
+    family = binomial
+  )
+  pooled_pred <- predict(pooled_mod, newdata = test, type = "response")
+  
+  # Pooled FE + interaction
+  pooled_int_mod <- glm(
+    beat_spy ~ log_pe + div_yield * factor(gics_sector_name),
+    data = train,
+    family = binomial
+  )
+  pooled_int_pred <- predict(pooled_int_mod, newdata = test, type = "response")
+  
+  # Sector-by-sector
+  sector_preds <- test %>%
+    group_by(gics_sector_name) %>%
+    group_modify(~ {
+      sect_train <- filter(train, gics_sector_name == .y$gics_sector_name)
+      mod <- glm(beat_spy ~ log_pe + div_yield, data = sect_train, family = binomial)
+      tibble(pred = predict(mod, newdata = .x, type = "response"))
+    }) %>%
+    pull(pred)
+  
+  tibble(
+    Ticker = test$Ticker,
+    true = test$beat_spy,
+    mixed = mixed_pred,
+    pooled = pooled_pred,
+    pooled_int = pooled_int_pred,
+    sector = sector_preds
+  )
+})
+
+cv_results <- cv_results %>%
+  mutate(
+    true_bin = ifelse(true == "yes", 1, 0)
+  )
+```
+
+```{r}
+auc_table <- tibble(
+  model = c("mixed", "pooled", "pooled_int", "sector_by_sector"),
+  auc = c(
+    auc(cv_results$true, cv_results$mixed),
+    auc(cv_results$true, cv_results$pooled),
+    auc(cv_results$true, cv_results$pooled_int),
+    auc(cv_results$true, cv_results$sector)
+  )
+)
+
+auc_table |> arrange(desc(auc))
+```
 
 # Bayesian
 
@@ -148,7 +247,7 @@ logit(p_{i,t}) = \beta_0 + \beta_1 + log(PE_{i,t}) + \beta_2 DivYield_{i,t}
 
 ```{r}
 #| results: hide
-bayes_model1 <- brm(
+bayes_model1 = brm(
   beat_spy ~ log_pe + div_yield,
   data = m3_df,
   family = bernoulli(link = "logit"),
