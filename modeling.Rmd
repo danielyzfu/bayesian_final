@@ -17,6 +17,7 @@ library(purrr)
 library(tidyr)
 library(pROC)
 library(groupdata2)
+library(car)
 ```
 
 ```{r}
@@ -154,6 +155,8 @@ bic_comp |> arrange(BIC)
 
 ### Predictive Performance
 ```{r}
+#| warning: hide
+#| message: hide
 cv_df <- m3_df %>% fold(k = 10, cat_col = "gics_sector_name")
 
 folds <- unique(cv_df$.folds)
@@ -226,6 +229,50 @@ auc_table <- tibble(
 )
 
 auc_table |> arrange(desc(auc))
+```
+
+## Model Diagnostics
+
+### Multicollinearity
+```{r}
+vif(pooled_fe)
+```
+
+### Influence/Outliers
+```{r}
+plot(cooks.distance(pooled_fe), type = "h")
+abline(h = 4/length(fitted(pooled_fe)), col = "red")
+```
+
+### Leverage
+```{r}
+plot(hatvalues(pooled_fe), type = "h")
+abline(h = 3*(length(coef(pooled_fe))+1)/length(fitted(pooled_fe)), col = "red")
+```
+
+### Residuals
+
+```{r}
+plot(residuals(pooled_fe, type = "deviance"),
+     col = rgb(0, 0, 0, 0.25))
+```
+
+```{r}
+ggplot(
+  data.frame(
+    fitted = fitted(pooled_fe),
+    resid = residuals(pooled_fe, type = "deviance")
+  ),
+  aes(x = fitted, y = resid)
+) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(se = FALSE, color = "blue") +
+  geom_hline(yintercept = 0, color = "red") +
+  theme_minimal()
+```
+
+```{r}
+crPlots(pooled_fe)
 ```
 
 # Bayesian
