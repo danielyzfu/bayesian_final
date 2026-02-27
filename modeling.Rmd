@@ -18,6 +18,10 @@ library(tidyr)
 library(pROC)
 library(groupdata2)
 library(car)
+library(brms)
+library(tidybayes)
+library(bayesplot)
+library(posterior)
 ```
 
 ```{r}
@@ -32,6 +36,7 @@ m3_df = m3_df |>
     gics_sector_name = factor(gics_sector_name),
     Ticker = factor(Ticker)
   )
+m3_df$gics_sector_name = as.factor(m3_df$gics_sector_name)
 set.seed(123)
 ```
 
@@ -80,27 +85,24 @@ mixed_random_slopes |> summary()
 ### Sector Fixed Effects
 ```{r}
 #pooled logistic model w sector fixed effects
-pooled_fe = glm(
-  beat_spy ~ log_pe + div_yield + factor(gics_sector_name),
+sector_fe = glm(
+  beat_spy ~ log_pe + div_yield + gics_sector_name,
   data = m3_df,
   family = binomial(link = "logit")
 )
-
-summary(pooled_fe)
+summary(sector_fe)
 ```
 
 ### Sector Fixed Effects w/ Interactions
 ```{r}
 #pooled logistic model w sector fe + interactions with DivYield
-pooled_fe_interact = glm(
-  beat_spy ~ 
-    log_pe +
-    div_yield * factor(gics_sector_name),
+sector_fe_interact = glmer(
+  beat_spy ~ (log_pe + div_yield) | gics_sector_name,
   data = m3_df,
   family = binomial(link = "logit")
 )
 
-summary(pooled_fe_interact)
+summary(sector_fe_interact)
 ```
 
 ## Model Comparison
@@ -120,8 +122,8 @@ sector_BIC = -2 * as.numeric(sector_logLik) +
               log(nrow(m3_df)) * sector_k
 
 # AIC
-aic_comp = AIC(pooled_fe,
-               pooled_fe_interact,
+aic_comp = AIC(sector_fe,
+               sector_fe_interact,
                mixed_random_slopes)
 aic_comp = data.frame(
   Model = rownames(aic_comp),
@@ -134,8 +136,8 @@ aic_comp = data.frame(
                    AIC = sector_AIC))
 
 #BIC
-bic_comp = BIC(pooled_fe,
-               pooled_fe_interact,
+bic_comp = BIC(sector_fe,
+               sector_fe_interact,
                mixed_random_slopes)
 bic_comp = data.frame(
   Model = rownames(bic_comp),
@@ -277,13 +279,7 @@ crPlots(pooled_fe)
 
 # Bayesian
 
-```{r}
-#| message: false
-library(brms)
-library(tidybayes)
-library(bayesplot)
-library(posterior)
-```
+## Models
 
 ### Model 1 (Logistic)
 
@@ -327,7 +323,7 @@ mcmc_acf_bar(
 
 acfs fall off quickly
 
-## Model 2 (Nested random intercepts)
+### Model 2 (Nested random intercepts)
 
 \begin{align*}
 logit(p_{i,t}) = \beta_0 + \beta_1 log(PE_{i,t}) + \beta_2 DivYield_{i,t} + u_{j} + v_i
@@ -374,6 +370,8 @@ acfs fall off quickly
 
 ### Model 3 (Mixed Effects + firm-level random slopes/intercepts)
 
+$$logit(p_{i,t}) = \beta_0 + \beta_1 log(PE_{i,t}) + \beta_2 DivYield_{i,t} + b_{0,i} + b_{1,i}log(PE_{i,t}) + b_{2,i} DivYield_{i,t}$$
+
 Covariates are centered
 
 ```{r}
@@ -411,6 +409,8 @@ mcmc_acf_bar(
 
 ### Model 4 (Pooled + sector FE)
 
+$$logit(p_{i,t}) = \beta_0 + \beta_1 log(PE_{i,t}) + \beta_2 DivYield_{i,t} + \sum^{J-1} \gamma_j \mathbb{1}(Sector_i=j)$$
+
 ```{r}
 #| results: hide
 bayes_fe = brm(
@@ -444,7 +444,7 @@ mcmc_acf_bar(
 )
 ```
 
-### Model Comparison
+## Model Comparison
 ```{r}
 loo_compare(loo(bayes_model1),
             loo(bayes_model2),
@@ -455,3 +455,8 @@ loo_compare(loo(bayes_model1),
 LOOCV favors the `pooled model with sector fixed effects` and the `model with nested random intercepts` over the `baseline pooled model` and `mixed effects model w/ firm-level random intercepts and slopes`.
 
 The sector FE and nested random intercepts models are generally comparable (firm-level variation may be small)
+
+## Model Checking
+```{r}
+pp_check(bayes_fe, ndraws=100)
+```
