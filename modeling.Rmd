@@ -22,6 +22,7 @@ library(brms)
 library(tidybayes)
 library(bayesplot)
 library(posterior)
+library(modelsummary)
 ```
 
 ```{r}
@@ -37,6 +38,7 @@ m3_df = m3_df |>
     Ticker = factor(Ticker)
   )
 m3_df$gics_sector_name = as.factor(m3_df$gics_sector_name)
+m3_df$Ticker = as.factor(m3_df$Ticker)
 set.seed(123)
 ```
 
@@ -44,20 +46,47 @@ set.seed(123)
 knitr::opts_chunk$set(echo = FALSE)
 ```
 
+# Baseline Logistic
+Fit a baseline logistic model to remove influential points before fitting (marginally) fancier frequentist + Bayesian models.
+
+```{r}
+baseline_logit = glm(
+  beat_spy ~ log_pe + div_yield,
+  data = m3_df,
+  family = binomial(link = "logit")
+)
+
+cooks_d = cooks.distance(baseline_logit)
+cooks_threshold = 4 / (nrow(m3_df) - length(coef(baseline_logit)))
+plot(cooks_d,
+     type = "h",
+     main = "Diagnosing Influential Points",
+     ylab = "Cook's Distance",
+     xlab = "Observation")
+abline(h = cooks_threshold, col = "red", lty = 2, lwd = 2)
+
+influential = which(cooks_d > cooks_threshold)
+#beatspy_clean = m3_df[-influential, ]
+```
+
+```{r}
+baseline_logit |> summary()
+```
+```{r}
+beatspy_clean = m3_df
+```
+
 # Frequentist
 
 ## Models
 
 ### Sector Models
+Logistic regression models fitted within each sector
 
 ```{r}
-#logistic regression models fitted within each sector
-library(purrr)
-library(modelsummary)
-
-sector_models = m3_df |>
+sector_models = beatspy_clean |>
   group_split(gics_sector_name) |>
-  setNames(unique(m3_df$gics_sector_name)) |>
+  setNames(unique(beatspy_clean$gics_sector_name)) |>
   map(~ glm(
     beat_spy ~ log_pe + div_yield,
     data = .x,
@@ -65,44 +94,69 @@ sector_models = m3_df |>
   ))
 
 modelsummary(sector_models)
-
 ```
 
 ### Firm Mixed Effects
+Random intercept + coefficient by firm
 ```{r}
-#mixed effects w/ firm-level random slopes
-mixed_random_slopes = glmer(
+#random intercept and random coefficient for firm
+firm_re = glmer(
   beat_spy ~ log_pe + div_yield +
     (1 + log_pe + div_yield | Ticker),
-  data = m3_df,
+  data = beatspy_clean,
   family = binomial(link = "logit"),
   control = glmerControl(optimizer = "bobyqa")
 )
 
-mixed_random_slopes |> summary()
+firm_re |> summary()
 ```
 
+Random effect correlations are high, indicating multicollinearity. Model is likely too overparametrized.
+
 ### Sector Fixed Effects
+
 ```{r}
 #pooled logistic model w sector fixed effects
 sector_fe = glm(
   beat_spy ~ log_pe + div_yield + gics_sector_name,
-  data = m3_df,
+  data = beatspy_clean,
   family = binomial(link = "logit")
 )
 summary(sector_fe)
 ```
 
-### Sector Fixed Effects w/ Interactions
+### Sector RI
 ```{r}
-#pooled logistic model w sector fe + interactions with DivYield
-sector_fe_interact = glmer(
-  beat_spy ~ (log_pe + div_yield) | gics_sector_name,
-  data = m3_df,
+sector_ri = glmer(
+  beat_spy ~ log_pe + div_yield  + (1 | gics_sector_name),
+  data = beatspy_clean,
   family = binomial(link = "logit")
 )
 
-summary(sector_fe_interact)
+summary(sector_ri)
+```
+
+### Nested
+```{r}
+nested = glmer(
+  beat_spy ~ log_pe + div_yield + (1|gics_sector_name/Ticker),
+  data = beatspy_clean,
+  family = binomial(link = "logit")
+)
+nested |> summary()
+```
+
+### Sector RE
+No coefficient for mean model, random intercept + coefficient for sector
+
+```{r}
+sector_re = glmer(
+  beat_spy ~ log_pe + div_yield + (1 + log_pe + div_yield | gics_sector_name),
+  data = beatspy_clean,
+  family = binomial(link = "logit")
+)
+
+summary(sector_re)
 ```
 
 ## Model Comparison
@@ -110,7 +164,7 @@ summary(sector_fe_interact)
 ### Information Criterion
 
 ```{r}
-# manually back out AIC + BIC
+# manually back out AIC + BIC for sector models
 # AIC = -2l + 2k
 # BIC = -2l + log(n) * k 
 
@@ -119,12 +173,13 @@ sector_k = sum(sapply(sector_models, function(m) attr(logLik(m), "df")))
 
 sector_AIC = -2 * as.numeric(sector_logLik) + 2 * sector_k
 sector_BIC = -2 * as.numeric(sector_logLik) + 
-              log(nrow(m3_df)) * sector_k
+              log(nrow(beatspy_clean)) * sector_k
 
 # AIC
-aic_comp = AIC(sector_fe,
-               sector_fe_interact,
-               mixed_random_slopes)
+aic_comp = AIC(baseline_logit,
+               firm_re,
+               sector_fe,
+               sector_re)
 aic_comp = data.frame(
   Model = rownames(aic_comp),
   df = aic_comp$df,
@@ -136,9 +191,12 @@ aic_comp = data.frame(
                    AIC = sector_AIC))
 
 #BIC
-bic_comp = BIC(sector_fe,
-               sector_fe_interact,
-               mixed_random_slopes)
+bic_comp = BIC(baseline_logit,
+               firm_re,
+               nested,
+               sector_fe,
+               sector_ri,
+               sector_re)
 bic_comp = data.frame(
   Model = rownames(bic_comp),
   df = bic_comp$df,
@@ -156,49 +214,53 @@ bic_comp |> arrange(BIC)
 ```
 
 ### Predictive Performance
+
 ```{r}
 #| warning: hide
 #| message: hide
-cv_df <- m3_df %>% fold(k = 10, cat_col = "gics_sector_name")
+cv_df = beatspy_clean |>
+  fold(k = 10, cat_col = "gics_sector_name")
 
-folds <- unique(cv_df$.folds)
+folds = unique(cv_df$.folds)
 
-cv_results <- map_dfr(folds, function(f){
+cv_results = map_dfr(folds, function(f){
   
-  train <- filter(cv_df, .folds != f)
-  test  <- filter(cv_df, .folds == f)
+  train = filter(cv_df, .folds != f)
+  test  = filter(cv_df, .folds == f)
+  train <- droplevels(train)
+  test  <- droplevels(test)
   
   # Mixed-effects logistic regression
-  mixed_mod <- glmer(
+  mixed_mod = glmer(
     beat_spy ~ log_pe + div_yield + (1 + log_pe + div_yield | Ticker),
     data = train,
     family = binomial,
     control = glmerControl(optimizer = "bobyqa")
   )
-  mixed_pred <- predict(mixed_mod, newdata = test, type = "response", re.form = NA)
+  pred_firm_re = predict(mixed_mod, newdata = test, type = "response", re.form = NA)
   
-  # Pooled FE
-  pooled_mod <- glm(
-    beat_spy ~ log_pe + div_yield + factor(gics_sector_name),
+  # sector FE
+  pooled_mod = glm(
+    beat_spy ~ log_pe + div_yield + gics_sector_name,
     data = train,
     family = binomial
   )
-  pooled_pred <- predict(pooled_mod, newdata = test, type = "response")
+  pred_sector_fe = predict(pooled_mod, newdata = test, type = "response")
   
-  # Pooled FE + interaction
-  pooled_int_mod <- glm(
-    beat_spy ~ log_pe + div_yield * factor(gics_sector_name),
+  # Sector random effects
+  pooled_int_mod = glmer(
+    beat_spy ~ (log_pe + div_yield) | gics_sector_name,
     data = train,
     family = binomial
   )
-  pooled_int_pred <- predict(pooled_int_mod, newdata = test, type = "response")
+  pooled_int_pred = predict(pooled_int_mod, newdata = test, type = "response")
   
   # Sector-by-sector
-  sector_preds <- test %>%
+  sector_preds = test %>%
     group_by(gics_sector_name) %>%
     group_modify(~ {
-      sect_train <- filter(train, gics_sector_name == .y$gics_sector_name)
-      mod <- glm(beat_spy ~ log_pe + div_yield, data = sect_train, family = binomial)
+      sect_train = filter(train, gics_sector_name == .y$gics_sector_name)
+      mod = glm(beat_spy ~ log_pe + div_yield, data = sect_train, family = binomial)
       tibble(pred = predict(mod, newdata = .x, type = "response"))
     }) %>%
     pull(pred)
@@ -206,14 +268,14 @@ cv_results <- map_dfr(folds, function(f){
   tibble(
     Ticker = test$Ticker,
     true = test$beat_spy,
-    mixed = mixed_pred,
-    pooled = pooled_pred,
+    mixed = pred_firm_re,
+    pooled = pred_sector_fe,
     pooled_int = pooled_int_pred,
     sector = sector_preds
   )
 })
 
-cv_results <- cv_results %>%
+cv_results = cv_results %>%
   mutate(
     true_bin = ifelse(true == "yes", 1, 0)
   )
@@ -221,7 +283,7 @@ cv_results <- cv_results %>%
 
 ```{r}
 auc_table <- tibble(
-  model = c("mixed", "pooled", "pooled_int", "sector_by_sector"),
+  model = c("Firm Random Effects", "Sector Fixed Effect", "Sector Random Intercept", "Sector Models"),
   auc = c(
     auc(cv_results$true, cv_results$mixed),
     auc(cv_results$true, cv_results$pooled),
@@ -236,34 +298,37 @@ auc_table |> arrange(desc(auc))
 ## Model Diagnostics
 
 ### Multicollinearity
+
 ```{r}
-vif(pooled_fe)
+vif(sector_fe)
 ```
 
 ### Influence/Outliers
+
 ```{r}
-plot(cooks.distance(pooled_fe), type = "h")
-abline(h = 4/length(fitted(pooled_fe)), col = "red")
+plot(cooks.distance(sector_fe), type = "h", ylab = "Cook's Distance")
+abline(h = 4/length(fitted(sector_fe)), col = "red")
 ```
 
 ### Leverage
+
 ```{r}
-plot(hatvalues(pooled_fe), type = "h")
-abline(h = 3*(length(coef(pooled_fe))+1)/length(fitted(pooled_fe)), col = "red")
+plot(hatvalues(sector_fe), type = "h")
+abline(h = 3*(length(coef(sector_fe))+1)/length(fitted(sector_fe)), col = "red")
 ```
 
 ### Residuals
 
 ```{r}
-plot(residuals(pooled_fe, type = "deviance"),
+plot(residuals(sector_fe, type = "deviance"),
      col = rgb(0, 0, 0, 0.25))
 ```
 
 ```{r}
 ggplot(
   data.frame(
-    fitted = fitted(pooled_fe),
-    resid = residuals(pooled_fe, type = "deviance")
+    fitted = fitted(sector_fe),
+    resid = residuals(sector_fe, type = "deviance")
   ),
   aes(x = fitted, y = resid)
 ) +
@@ -274,14 +339,14 @@ ggplot(
 ```
 
 ```{r}
-crPlots(pooled_fe)
+crPlots(sector_fe)
 ```
 
 # Bayesian
 
 ## Models
 
-### Model 1 (Logistic)
+### Simple Logistic
 
 \begin{align*}
 Y_{i,t} \sim Bernoulli(p_{i,t})\\
@@ -290,25 +355,25 @@ logit(p_{i,t}) = \beta_0 + \beta_1 + log(PE_{i,t}) + \beta_2 DivYield_{i,t}
 
 ```{r}
 #| results: hide
-bayes_model1 = brm(
+bayes_baseline = brm(
   beat_spy ~ log_pe + div_yield,
-  data = m3_df,
+  data = beatspy_clean,
   family = bernoulli(link = "logit"),
   seed = 123
 )
 ```
 
 ```{r}
-summary(bayes_model1)$fixed
+summary(bayes_baseline)$fixed
 ```
 
-Rhats are ~1 and effective sample sizes >> 100
+Rhats are \~1 and effective sample sizes \>\> 100
 
 ```{r}
-draws_model1 = bayes_model1 |>
+draws_bayes_baseline = bayes_baseline |>
   as_draws_array()
 
-mcmc_trace(draws_model1,
+mcmc_trace(draws_bayes_baseline,
            pars = c("b_log_pe", "b_div_yield", "b_Intercept"))
 ```
 
@@ -316,7 +381,7 @@ No discernable pattern from trace plots
 
 ```{r}
 mcmc_acf_bar(
-  draws_model1,
+  draws_bayes_baseline,
   pars = c("b_log_pe", "b_div_yield", "b_Intercept")
 )
 ```
@@ -343,7 +408,7 @@ bayes_model2 = brm(
 summary(bayes_model2)
 ```
 
-Rhats are all ~1, effective sample sizes >> 100
+Rhats are all \~1, effective sample sizes \>\> 100
 
 ```{r}
 draws_model2 = bayes_model2 |>
@@ -389,7 +454,7 @@ bayes_model3 = brm(
 summary(bayes_model3)
 ```
 
-Rhats are ~1 and effective sample sizes >> 100
+Rhats are \~1 and effective sample sizes \>\> 100
 
 ```{r}
 draws_bayes_mixed = bayes_model3 |>
@@ -425,7 +490,7 @@ bayes_fe = brm(
 summary(bayes_fe)
 ```
 
-Rhats are ~1 and effective sample sizes >> 100
+Rhats are \~1 and effective sample sizes \>\> 100
 
 ```{r}
 draws_bayes_fe = bayes_fe |>
@@ -444,7 +509,10 @@ mcmc_acf_bar(
 )
 ```
 
+# 
+
 ## Model Comparison
+
 ```{r}
 loo_compare(loo(bayes_model1),
             loo(bayes_model2),
@@ -457,6 +525,7 @@ LOOCV favors the `pooled model with sector fixed effects` and the `model with ne
 The sector FE and nested random intercepts models are generally comparable (firm-level variation may be small)
 
 ## Model Checking
+
 ```{r}
 pp_check(bayes_fe, ndraws=100)
 ```

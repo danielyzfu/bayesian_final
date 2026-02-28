@@ -1,0 +1,116 @@
+---
+title: "STAT 27410 Final Project Proposal"
+author: "Daniel Fu and Jack Wong"
+fontsize: 12pt
+bibliography: references.bib
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+  geometry: margin=0.75in
+fig_crop: no
+---
+
+```{r echo=FALSE, message=FALSE}
+library(knitr)
+knitr::opts_chunk$set(fig.width=4, fig.height=3, message=F, warning=F)
+options(scipen=6, digits=6)
+```
+
+# 1. Introduction
+
+The primary question of interest is whether individual firms outperform the market over time. To this end, we use the SPDR S&P 500 ETF Trust (SPY) as a benchmark and define outperformance at the annual horizon. Specifically, we study (i) the probability that a firm’s annual return exceeds SPY and (ii) whether differences across stocks, specifically in outperformance can be explained by firm characteristics such as valuation and income measures using price-to-earnings (P/E) ratio and dividend yield as proxies.
+
+This distinction is hard to make in practice since returns are noisy, especially over short horizons (we only have access to 10 years worth of data, and only 9 full calendar years), so even large wins can be driven by luck rather than persistent skill. Focusing on annual returns helps smooth out some of this volatility and gives a more economically meaningful measure of performance. At the same time, valuation and dividend measures provide predictors that may help explain why some firms appear to beat the market more often than others.
+
+Bayesian methods are especially useful here because the data are limited at the firm level: each firm only has about ten annual observations. By treating a firm’s probability of beating the market as unknown and combining the data with reasonable prior beliefs, Bayesian inference allows us to express uncertainty directly and reduces the risk of over-interpreting extreme outcomes that may simply be noise.
+
+
+# 2. Exploratory Data Analysis
+
+```{r annual_return_dbn}
+# Annual return distribution (from weekly returns)
+# Assumes you already have: spx_long with columns Date (Date), Ticker, ret_w
+
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(scales)
+
+spx_annual <- spx_rets %>%
+  filter(!is.na(ret_w)) %>%
+  mutate(Year = year(Date)) %>%
+  group_by(Ticker, Year) %>%
+  summarise(
+    n_weeks = n(),
+    ret_y = prod(1 + ret_w) - 1,
+    .groups = "drop"
+  ) %>%
+  filter(n_weeks >= 45)   # keep full-ish years
+
+ggplot(spx_annual, aes(x = ret_y)) +
+  geom_histogram(bins = 60) +
+  scale_x_continuous(labels = percent_format()) +
+  labs(
+    title = "Distribution of annual stock returns (firm-years)",
+    x = "Annual return",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+# 3. Frequentist Analysis
+
+Perform the frequentist analysis in this session.
+
+## 3.1 Proposed Frequentist Model(s)
+
+In this section, formulate the frequentist model(s) you are going to use to analyze your dataset. Be sure to first define the notations involved in the model(s).
+
+## 3.2 Fitting the Frequentist Model(s)
+
+In this section, 
+* discuss how you fit the proposed frequentist model(s).
+* report the results.
+* interpret the results in the context.
+
+# 4. Bayesian Analysis
+
+Propose the Bayesian analysis you will work on during the rest of the quarter in this session.
+
+## 4.1 Proposed Bayesian Model(s)
+
+In this section, 
+
+* formulate the Bayesian model(s) you are going to use to analyze your dataset. Be sure to first define the notations involved in the model(s).
+* discuss how you will elicit the prior(s).
+
+## 4.2 Fitting the Bayesian model(s)
+
+* Propose how you will fit the proposed Bayesian models.
+
+* Propose how you will perform sensitivity analysis of the Bayesian models, i.e., how the posterior distribution is affected by the prior 
+
+* Propose how you will check the MCMC convergence. 
+
+## 4.3 Prediction
+
+In this section, propose how you can make predictions using the Bayesian model. 
+
+# 5. Discussion
+
+In this section, discuss how you can improve your model.
+
+# 6. Contributions
+
+In this section, discuss the percentage of your contributions to the development final project proposal. Report the number of hours you have worked on the proposal, and the sections you are involved.
+
+Please also discuss briefly the contributions of your teammate(s), as well as the help and support you got from your teammates(s).
+
+# References
+<div id="refs"></div>
+
+# Appendix
+
+You can delegate detailed math derivations and/or sketch of algorithms and/or code in this section. 
