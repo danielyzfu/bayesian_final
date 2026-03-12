@@ -70,7 +70,7 @@ influential = which(cooks_d > cooks_threshold)
 ```
 
 ```{r}
-baseline_logit |> summary()
+summary(baseline_logit)$coef |> xtable()
 ```
 ```{r}
 beatspy_clean = m3_df
@@ -111,6 +111,14 @@ firm_re = glmer(
 firm_re |> summary()
 ```
 
+```{r}
+summary(firm_re)$coef |> xtable()
+```
+
+```{r}
+VarCorr(firm_re) |> as.data.frame() |> xtable()
+```
+
 Random effect correlations are high, indicating multicollinearity. Model is likely too overparametrized.
 
 ### Sector Fixed Effects
@@ -123,6 +131,10 @@ sector_fe = glm(
   family = binomial(link = "logit")
 )
 summary(sector_fe)
+```
+
+```{r}
+summary(sector_fe)$coef |> xtable()
 ```
 
 ### Sector RI
@@ -209,6 +221,14 @@ bic_comp = data.frame(
 ```
 
 ```{r}
+BIC(baseline_logit,
+    firm_re,
+    sector_fe) |>
+  arrange(BIC) |>
+  xtable()
+```
+
+```{r}
 aic_comp |> arrange(AIC)
 bic_comp |> arrange(BIC)
 ```
@@ -216,6 +236,7 @@ bic_comp |> arrange(BIC)
 ### Predictive Performance
 
 ```{r}
+set.seed(123)
 #| warning: hide
 #| message: hide
 cv_df = beatspy_clean |>
@@ -229,6 +250,20 @@ cv_results = map_dfr(folds, function(f){
   test  = filter(cv_df, .folds == f)
   train <- droplevels(train)
   test  <- droplevels(test)
+  
+  baseline_mod = glm(
+    beat_spy ~ log_pe + div_yield,
+    data = train,
+    family = binomial(link = "logit")
+    )
+  pred_baseline = predict(baseline_mod, newdata = test, type = "response")
+  
+  re_mod = glmer(
+    beat_spy ~ log_pe + div_yield + (1|gics_sector_name),
+    data = train,
+    family = binomial(link = "logit")
+    )
+  pred_re = predict(re_mod, newdata = test, type = "response")
   
   # Mixed-effects logistic regression
   mixed_mod = glmer(
@@ -246,32 +281,15 @@ cv_results = map_dfr(folds, function(f){
     family = binomial
   )
   pred_sector_fe = predict(pooled_mod, newdata = test, type = "response")
-  
-  # Sector random effects
-  pooled_int_mod = glmer(
-    beat_spy ~ (log_pe + div_yield) | gics_sector_name,
-    data = train,
-    family = binomial
-  )
-  pooled_int_pred = predict(pooled_int_mod, newdata = test, type = "response")
-  
-  # Sector-by-sector
-  sector_preds = test %>%
-    group_by(gics_sector_name) %>%
-    group_modify(~ {
-      sect_train = filter(train, gics_sector_name == .y$gics_sector_name)
-      mod = glm(beat_spy ~ log_pe + div_yield, data = sect_train, family = binomial)
-      tibble(pred = predict(mod, newdata = .x, type = "response"))
-    }) %>%
-    pull(pred)
+
   
   tibble(
     Ticker = test$Ticker,
     true = test$beat_spy,
     mixed = pred_firm_re,
     pooled = pred_sector_fe,
-    pooled_int = pooled_int_pred,
-    sector = sector_preds
+    baseline = pred_baseline,
+    fei = pred_re
   )
 })
 
@@ -283,12 +301,12 @@ cv_results = cv_results %>%
 
 ```{r}
 auc_table <- tibble(
-  model = c("Firm Random Effects", "Sector Fixed Effect", "Sector Random Intercept", "Sector Models"),
+  model = c("Firm Mixed Effects", "Sector Fixed Effect", "Baseline Logistic", "Fei"),
   auc = c(
     auc(cv_results$true, cv_results$mixed),
     auc(cv_results$true, cv_results$pooled),
-    auc(cv_results$true, cv_results$pooled_int),
-    auc(cv_results$true, cv_results$sector)
+    auc(cv_results$true, cv_results$baseline),
+    auc(cv_results$true, cv_results$fei)
   )
 )
 
@@ -300,14 +318,99 @@ auc_table |> arrange(desc(auc))
 ### Multicollinearity
 
 ```{r}
-vif(sector_fe)
+vif(sector_fe) |> as.data.frame() |> xtable()
 ```
 
 ### Influence/Outliers
 
 ```{r}
+png("images/cooks.png",height=2000,width=2000,res=300)
+
 plot(cooks.distance(sector_fe), type = "h", ylab = "Cook's Distance")
 abline(h = 4/length(fitted(sector_fe)), col = "red")
+
+dev.off()
+
+```
+
+```{r}
+cooks_d = cooks.distance(sector_fe)
+cooks_threshold = 4 / (nrow(m3_df) - length(coef(sector_fe)))
+
+influential = which(cooks_d > cooks_threshold)
+test_cook = m3_df[-influential, ]
+cook_sector_fe = glm(
+  beat_spy ~ log_pe + div_yield + gics_sector_name,
+  data = test_cook,
+  family = binomial(link = "logit")
+)
+summary(cook_sector_fe)$coef
+```
+```{r}
+cv_df = test_cook |>
+  fold(k = 10, cat_col = "gics_sector_name")
+
+folds = unique(cv_df$.folds)
+
+cook_cv_results = map_dfr(folds, function(f){
+  
+  train = filter(cv_df, .folds != f)
+  test  = filter(cv_df, .folds == f)
+  train <- droplevels(train)
+  test  <- droplevels(test)
+  
+  baseline_mod = glm(
+    beat_spy ~ log_pe + div_yield,
+    data = train,
+    family = binomial(link = "logit")
+    )
+  pred_baseline = predict(baseline_mod, newdata = test, type = "response")
+  
+  # Mixed-effects logistic regression
+  mixed_mod = glmer(
+    beat_spy ~ log_pe + div_yield + (1 + log_pe + div_yield | Ticker),
+    data = train,
+    family = binomial,
+    control = glmerControl(optimizer = "bobyqa")
+  )
+  pred_firm_re = predict(mixed_mod, newdata = test, type = "response", re.form = NA)
+  
+  # sector FE
+  pooled_mod = glm(
+    beat_spy ~ log_pe + div_yield + gics_sector_name,
+    data = train,
+    family = binomial
+  )
+  pred_sector_fe = predict(pooled_mod, newdata = test, type = "response")
+
+  
+  tibble(
+    Ticker = test$Ticker,
+    true = test$beat_spy,
+    mixed = pred_firm_re,
+    pooled = pred_sector_fe,
+    baseline = pred_baseline
+  )
+})
+
+cook_cv_results = cook_cv_results %>%
+  mutate(
+    true_bin = ifelse(true == "yes", 1, 0)
+  )
+```
+
+```{r}
+cook_auc_table <- tibble(
+  model = c("Firm Mixed Effects", "Sector Fixed Effect", "Baseline Logistic"),
+  auc = c(
+    auc(cook_cv_results$true, cook_cv_results$mixed),
+    auc(cook_cv_results$true, cook_cv_results$pooled),
+    auc(cook_cv_results$true, cook_cv_results$baseline)
+  )
+)
+
+auc_table |> arrange(desc(auc)) |> xtable()
+
 ```
 
 ### Leverage
@@ -339,7 +442,9 @@ ggplot(
 ```
 
 ```{r}
+png("images/cr.png",height=2000,width=2000,res=300)
 crPlots(sector_fe)
+dev.off()
 ```
 
 # Bayesian
@@ -364,7 +469,7 @@ bayes_baseline = brm(
 ```
 
 ```{r}
-summary(bayes_baseline)$fixed
+summary(bayes_baseline)$fixed |> xtable()
 ```
 
 Rhats are \~1 and effective sample sizes \>\> 100
@@ -375,6 +480,7 @@ draws_bayes_baseline = bayes_baseline |>
 
 mcmc_trace(draws_bayes_baseline,
            pars = c("b_log_pe", "b_div_yield", "b_Intercept"))
+ggsave("images/baseline_trace.png")
 ```
 
 No discernable pattern from trace plots
@@ -384,6 +490,7 @@ mcmc_acf_bar(
   draws_bayes_baseline,
   pars = c("b_log_pe", "b_div_yield", "b_Intercept")
 )
+ggsave("images/baseline_acf.png")
 ```
 
 acfs fall off quickly
@@ -472,14 +579,10 @@ mcmc_acf_bar(
   pars = c("b_log_pe", "b_div_yield", "b_Intercept","sd_Ticker__Intercept", "sd_Ticker__log_pe", "sd_Ticker__div_yield"))
 ```
 
-### Model 4 (Pooled + sector FE)
-
-$$logit(p_{i,t}) = \beta_0 + \beta_1 log(PE_{i,t}) + \beta_2 DivYield_{i,t} + \sum^{J-1} \gamma_j \mathbb{1}(Sector_i=j)$$
 
 ```{r}
-#| results: hide
-bayes_fe = brm(
-  beat_spy ~ log_pe + div_yield + factor(gics_sector_name),
+bayes_ri = brm(
+  beat_spy ~ log_pe + div_yield + (1|gics_sector_name),
   data = m3_df,
   family = bernoulli(link = "logit"),
   seed = 123
@@ -487,7 +590,25 @@ bayes_fe = brm(
 ```
 
 ```{r}
-summary(bayes_fe)
+summary(bayes_ri)
+```
+
+### Model 4 (Pooled + sector FE)
+
+$$logit(p_{i,t}) = \beta_0 + \beta_1 log(PE_{i,t}) + \beta_2 DivYield_{i,t} + \sum^{J-1} \gamma_j \mathbb{1}(Sector_i=j)$$
+
+```{r}
+#| results: hide
+bayes_fe = brm(
+  beat_spy ~ log_pe + div_yield + gics_sector_name,
+  data = m3_df,
+  family = bernoulli(link = "logit"),
+  seed = 123
+)
+```
+
+```{r}
+summary(bayes_fe)$fixed |> xtable()
 ```
 
 Rhats are \~1 and effective sample sizes \>\> 100
@@ -497,7 +618,8 @@ draws_bayes_fe = bayes_fe |>
   as_draws_array()
 
 mcmc_trace(draws_bayes_fe,
-           pars = c("b_log_pe", "b_div_yield", "b_Intercept","b_factorgics_sector_nameInformationTechnology"))
+           pars = c("b_log_pe", "b_div_yield", "b_Intercept","b_gics_sector_nameInformationTechnology"))
+ggsave("images/sector_trace.png")
 ```
 
 No discernable pattern from trace plots
@@ -505,8 +627,9 @@ No discernable pattern from trace plots
 ```{r}
 mcmc_acf_bar(
   draws_bayes_fe,
-  pars = c("b_log_pe", "b_div_yield", "b_Intercept","b_factorgics_sector_nameInformationTechnology")
+  pars = c("b_log_pe", "b_div_yield", "b_Intercept","b_gics_sector_nameInformationTechnology")
 )
+ggsave("images/sector_acf.png")
 ```
 
 # 
@@ -514,10 +637,10 @@ mcmc_acf_bar(
 ## Model Comparison
 
 ```{r}
-loo_compare(loo(bayes_model1),
-            loo(bayes_model2),
-            loo(bayes_model3),
-            loo(bayes_fe))
+loo_compare(loo(bayes_baseline),
+            loo(bayes_fe)) |>
+  as.data.frame() |>
+  xtable()
 ```
 
 LOOCV favors the `pooled model with sector fixed effects` and the `model with nested random intercepts` over the `baseline pooled model` and `mixed effects model w/ firm-level random intercepts and slopes`.
@@ -527,5 +650,97 @@ The sector FE and nested random intercepts models are generally comparable (firm
 ## Model Checking
 
 ```{r}
-pp_check(bayes_fe, ndraws=100)
+pp_check(bayes_fe)
+ggsave("images/sector_pp.png")
+```
+```{r}
+prior_weak <- c(
+  prior(student_t(3, 0, 2.5), class = "b"),
+  prior(student_t(3, 0, 5), class = "Intercept")
+)
+
+bayes_weak <- brm(
+  beat_spy ~ log_pe + div_yield + gics_sector_name,
+  data = m3_df,
+  family = bernoulli(link = "logit"),
+  prior = prior_weak,
+  seed = 123
+)
+```
+
+```{r}
+prior_regularized <- c(
+  prior(normal(0, 1), class = "b"),
+  prior(normal(0, 2), class = "Intercept")
+)
+
+bayes_regularized <- brm(
+  beat_spy ~ log_pe + div_yield + gics_sector_name,
+  data = m3_df,
+  family = bernoulli(link = "logit"),
+  prior = prior_regularized,
+  seed = 123
+)
+```
+
+```{r}
+summary(bayes_weak)$fixed |> xtable()
+```
+
+```{r}
+summary(bayes_regularized)$fixed |> xtable()
+```
+
+```{r}
+loo_fe  <- loo(bayes_fe)
+loo_weak <- loo(bayes_weak)
+loo_reg <- loo(bayes_regularized)
+loo_compare(loo_fe, loo_weak, loo_reg)
+```
+
+```{r}
+pp_check(bayes_weak)
+ggsave("images/weak_pp.png")
+```
+
+```{r}
+pp_check(bayes_regularized)
+ggsave("images/reg_pp.png")
+```
+
+```{r}
+kfold_fe <- kfold(bayes_fe, K = 10)
+print(kfold_fe)
+```
+
+```{r}
+new_stock <- data.frame(
+  div_yield = seq(0, 5),
+  log_pe = 3,
+  gics_sector_name = "Consumer Discretionary"
+)
+pred_prob <- posterior_epred(bayes_fe, newdata = new_stock)
+pred_df = new_stock |>
+  mutate(mean = apply(pred_prob, 2, mean),
+         lower = apply(pred_prob, 2, quantile, 0.025),
+         upper = apply(pred_prob, 2, quantile, 0.975))
+
+ggplot(pred_df, aes(x = div_yield, y = mean)) +
+  geom_line()+
+  geom_ribbon(aes(ymin = lower, ymax = upper),
+              alpha = 0.5) +
+  labs(
+    x = "Dividend Yield",
+    y = "Predicted Probability of Beating SPY",
+    title = "Consumer Discretionary firm with log(P/E) = 3"
+  )
+ggsave("images/prediction.png")
+```
+
+```{r}
+mcmc_hist(
+  draws_bayes_fe,
+  pars = c("b_log_pe", "b_div_yield", "b_Intercept","b_gics_sector_nameInformationTechnology")
+)
+ggsave("images/hist.png")
 ```

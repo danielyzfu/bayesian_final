@@ -99,7 +99,7 @@ spx_annual <- spx_rets %>%
   ) %>%
   filter(n_weeks >= 45)   # keep full-ish years
 
-ggplot(spx_annual, aes(x = ret_y)) +
+return_dbn = ggplot(spx_annual, aes(x = ret_y)) +
   geom_histogram(bins = 60) +
   scale_x_continuous(labels = percent_format()) +
   labs(
@@ -109,7 +109,7 @@ ggplot(spx_annual, aes(x = ret_y)) +
   ) +
   theme_minimal()
 
-
+ggsave("return_dbn.png")
 
 ```
 
@@ -178,7 +178,7 @@ ggplot(beat_summary, aes(x = beat_rate)) +
   ) +
   theme_minimal()
 
-
+ggsave("images/outperformance.png")
 
 ```
 
@@ -209,7 +209,7 @@ ggplot(plot_df, aes(x = weekly_vol, y = beat_rate)) +
   ) +
   theme_minimal()
 
-
+ggsave("images/out_v_vol.png")
 ```
 
 ```{r setup_firm_chars}
@@ -242,7 +242,7 @@ ggplot(firm_chars, aes(x = mean_value_EQY_DVD_YLD_IND)) +
     y = "Number of firms"
   ) +
   theme_minimal()
-
+ggsave("images/div_dbn.png")
 ```
 ```{r pe_dbn}
 
@@ -256,7 +256,7 @@ ggplot(firm_chars, aes(x = mean_value_PE_RATIO)) +
   ) +
   theme_minimal()
 
-
+ggsave("images/pe_dbn.png")
 ```
 ```{r old_dvd_vs_perf}
 
@@ -306,7 +306,7 @@ div_vs_beat |>
   scale_x_discrete(labels = c("0" = "Does Not Beat SPY",
                               "1"  = "Beats SPY")) +
   theme_minimal()
-
+ggsave("images/div_v_beat.png")
 ```
 
 ```{r div_vs_beat_faceted}
@@ -351,6 +351,7 @@ pe_vs_beat |>
   scale_x_discrete(labels = c("0" = "Does Not Beat SPY",
                               "1"  = "Beats SPY")) +
   theme_minimal()
+ggsave("images/pe_v_beat.png")
 ```
 
 ```{r}
